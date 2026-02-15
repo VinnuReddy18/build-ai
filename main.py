@@ -46,6 +46,36 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
+# Welcome popup (shown once per session)
+# ---------------------------------------------------------------------------
+@st.dialog("🛡️ Aegis AI — Important Note")
+def _show_welcome():
+    st.markdown("""
+This is a **fully working, end-to-end AI surveillance system** powered by **Claude Vision AI**.
+
+⚠️ **Live camera feed is not available in this deployed version** — Streamlit runs server-side 
+and cannot directly access your browser's camera hardware in production. However, the **live feed 
+works perfectly when running locally** with a USB or Iriun webcam.
+
+You can still **upload any video file** here to see the complete AI analysis pipeline in action — 
+threat detection, motion analysis, multi-language alerts, and Twilio notifications all work end-to-end.
+
+📩 **For a live camera demo, please contact a team member** — we'll be happy to run it locally and 
+show you the real-time surveillance in action.
+
+🚀 **Next Phase:** For production-level live streaming, we plan to migrate to a **Flask/FastAPI backend 
+with WebRTC & RTSP** integration — enabling direct browser camera access, multi-camera support, 
+and scalable real-time monitoring from anywhere.
+""")
+    if st.button("Got it, let's go! 🚀", use_container_width=True, type="primary"):
+        st.session_state._welcome_shown = True
+        st.rerun()
+
+if not st.session_state.get("_welcome_shown", False):
+    _show_welcome()
+
+
+# ---------------------------------------------------------------------------
 # WebRTC helpers (only used in Browser Camera mode)
 # ---------------------------------------------------------------------------
 def get_rtc_config():
@@ -381,11 +411,16 @@ with st.sidebar:
         st.session_state.source_type = "video"
         uploaded = st.file_uploader("Upload", type=["mp4", "avi", "mov", "mkv"])
         if uploaded:
-            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tfile.write(uploaded.read())
-            tfile.flush()
-            st.session_state.video_file_path = tfile.name
-            st.success(f"✅ {uploaded.name}")
+            # Only write the file once per unique upload (avoid re-reading consumed buffer on rerun)
+            upload_key = f"{uploaded.name}_{uploaded.size}"
+            if st.session_state.get("_last_upload_key") != upload_key:
+                tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tfile.write(uploaded.read())
+                tfile.flush()
+                tfile.close()  # Close so OpenCV can open it on Windows
+                st.session_state.video_file_path = tfile.name
+                st.session_state._last_upload_key = upload_key
+                st.success(f"✅ {uploaded.name}")
 
     st.markdown("")
 
