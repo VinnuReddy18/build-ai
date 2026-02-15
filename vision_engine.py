@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
@@ -189,10 +189,13 @@ def analyze_frame(frame) -> dict:
         processed = preprocess_frame(frame)
         img_b64 = frame_to_base64(processed)
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            base_url="https://api.anthropic.com",
+        )
 
         message = client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-3-5-haiku-latest",
             max_tokens=500,
             system=SYSTEM_PROMPT,
             messages=[

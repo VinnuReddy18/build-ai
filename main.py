@@ -21,7 +21,7 @@ from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 # Import our modules
 from database import init_db, log_event, get_recent_events, get_event_stats
