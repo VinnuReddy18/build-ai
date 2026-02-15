@@ -437,11 +437,12 @@ with col_camera:
                     bg_b64 or "",
                 )
 
-                # Trigger WhatsApp alert for HIGH threats
+                # Trigger WhatsApp + Voice Call for HIGH threats
                 if bg_result.get("threat_level", "").lower() == "high":
                     send_high_threat_alert(
                         bg_result.get("description", ""),
                         bg_result.get("description_telugu", ""),
+                        bg_result.get("action_needed", ""),
                     )
             elif bg_result and "error" in bg_result:
                 analysis_result_box.warning(f"Analysis error: {bg_result['error']}")
