@@ -1,13 +1,6 @@
 """
-main.py — Streamlit UI & Frame capture for Home Guard AI.
-
-Features:
-  - Live webcam feed via cv2.VideoCapture(0)
-  - Video file upload support
-  - Real-time activity feed from database
-  - Privacy toggle (Start/Stop monitoring)
-  - Motion detection with visual indicators
-  - Claude AI analysis with threat-level badges
+main.py — Aegis AI Surveillance System.
+Premium Streamlit UI with glassmorphism, animations, and real-time monitoring.
 """
 
 import os
@@ -23,184 +16,365 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# Import our modules
 from database import init_db, log_event, get_recent_events, get_event_stats
 from vision_engine import (
-    preprocess_frame,
-    frame_to_base64,
-    detect_motion,
-    get_motion_score,
-    draw_status_overlay,
-    draw_motion_border,
-    draw_bounding_boxes,
-    analyze_frame,
-    analyze_frame_mock,
-    is_claude_configured,
-    can_analyze,
-    should_call_claude,
-    BackgroundAnalyzer,
+    preprocess_frame, frame_to_base64, detect_motion, get_motion_score,
+    draw_status_overlay, draw_motion_border, draw_bounding_boxes,
+    analyze_frame, analyze_frame_mock, is_claude_configured,
+    can_analyze, should_call_claude, BackgroundAnalyzer,
 )
-from alerts import send_high_threat_alert, is_configured as is_twilio_configured
+from alerts import send_high_threat_alert, is_configured as is_twilio_configured, is_voice_configured
 
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Home Guard AI — Surveillance System",
+    page_title="Aegis — AI Surveillance",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-
 # ---------------------------------------------------------------------------
-# Custom CSS for premium dark UI
+# CSS — Glassmorphism + Glow + Animations
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* Global font */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+    :root {
+        --bg-primary: #030712;
+        --bg-card: rgba(15, 23, 42, 0.6);
+        --bg-glass: rgba(15, 23, 42, 0.4);
+        --border: rgba(56, 189, 248, 0.08);
+        --border-hover: rgba(56, 189, 248, 0.2);
+        --accent: #38bdf8;
+        --accent2: #818cf8;
+        --danger: #ef4444;
+        --warning: #f59e0b;
+        --success: #10b981;
+        --text-primary: #f1f5f9;
+        --text-secondary: #94a3b8;
+        --text-muted: #475569;
+    }
+
     * { font-family: 'Inter', sans-serif; }
 
-    /* Header */
-    .main-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        padding: 1.5rem 2rem;
+    /* ── Animated background ── */
+    .stApp {
+        background: var(--bg-primary);
+    }
+
+    /* ── Keyframes ── */
+    @keyframes pulse-glow {
+        0%, 100% { box-shadow: 0 0 15px rgba(56,189,248,0.1); }
+        50% { box-shadow: 0 0 30px rgba(56,189,248,0.2); }
+    }
+    @keyframes live-dot {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+    }
+    @keyframes shimmer {
+        0% { background-position: -200% center; }
+        100% { background-position: 200% center; }
+    }
+    @keyframes slide-up {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes border-pulse {
+        0%, 100% { border-color: rgba(239,68,68,0.3); }
+        50% { border-color: rgba(239,68,68,0.6); }
+    }
+
+    /* ── Header ── */
+    .aegis-header {
+        background: var(--bg-glass);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        padding: 1rem 1.5rem;
         border-radius: 16px;
-        margin-bottom: 1.5rem;
-        border: 1px solid rgba(255,255,255,0.08);
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        margin-bottom: 1rem;
+        border: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        animation: pulse-glow 4s ease-in-out infinite;
     }
-    .main-header h1 {
-        color: #e94560;
+    .aegis-header .logo-group {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+    }
+    .aegis-header .shield {
         font-size: 2rem;
+        filter: drop-shadow(0 0 8px rgba(56,189,248,0.4));
+    }
+    .aegis-header h1 {
+        background: linear-gradient(135deg, var(--accent), var(--accent2));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 1.6rem;
         margin: 0;
-        font-weight: 700;
+        font-weight: 800;
+        letter-spacing: 2px;
     }
-    .main-header p {
-        color: #a0a0b0;
-        margin: 0.3rem 0 0 0;
-        font-size: 0.95rem;
-    }
-
-    /* Stat cards */
-    .stat-card {
-        background: linear-gradient(135deg, #1a1a2e, #16213e);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 12px;
-        padding: 1.2rem;
-        text-align: center;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-    }
-    .stat-card .stat-value {
-        font-size: 2rem;
-        font-weight: 700;
+    .aegis-header .tagline {
+        color: var(--text-muted);
         margin: 0;
-    }
-    .stat-card .stat-label {
-        color: #a0a0b0;
-        font-size: 0.8rem;
+        font-size: 0.65rem;
+        letter-spacing: 3px;
         text-transform: uppercase;
-        letter-spacing: 1px;
-        margin: 0;
+        font-weight: 500;
     }
-    .stat-high .stat-value { color: #e94560; }
-    .stat-med .stat-value { color: #f5a623; }
-    .stat-low .stat-value { color: #0be881; }
-    .stat-total .stat-value { color: #4fc3f7; }
-
-    /* Event cards */
-    .event-card {
-        background: linear-gradient(135deg, #1a1a2e, #16213e);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 12px;
-        padding: 1rem 1.2rem;
-        margin-bottom: 0.8rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        transition: transform 0.2s ease;
-    }
-    .event-card:hover {
-        transform: translateY(-2px);
-        border-color: rgba(233,69,96,0.3);
-    }
-
-    /* Threat badges */
-    .badge {
-        display: inline-block;
-        padding: 0.2rem 0.7rem;
+    .live-badge {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.25rem 0.7rem;
         border-radius: 20px;
         font-size: 0.7rem;
         font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 1px;
     }
-    .badge-high { background: rgba(233,69,96,0.2); color: #e94560; border: 1px solid rgba(233,69,96,0.3); }
-    .badge-medium { background: rgba(245,166,35,0.2); color: #f5a623; border: 1px solid rgba(245,166,35,0.3); }
-    .badge-low { background: rgba(11,232,129,0.2); color: #0be881; border: 1px solid rgba(11,232,129,0.3); }
+    .live-badge.active {
+        background: rgba(16,185,129,0.1);
+        color: var(--success);
+        border: 1px solid rgba(16,185,129,0.25);
+    }
+    .live-badge.active .dot {
+        width: 6px; height: 6px;
+        background: var(--success);
+        border-radius: 50%;
+        animation: live-dot 1.5s ease-in-out infinite;
+    }
+    .live-badge.paused {
+        background: rgba(245,158,11,0.1);
+        color: var(--warning);
+        border: 1px solid rgba(245,158,11,0.25);
+    }
 
-    /* Status indicator */
-    .status-active {
-        display: inline-flex;
+    /* ── Stat cards ── */
+    .stats-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.6rem;
+        margin-bottom: 0.8rem;
+    }
+    .stat-card {
+        background: var(--bg-glass);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.8rem 0.6rem;
+        text-align: center;
+        transition: all 0.3s ease;
+    }
+    .stat-card:hover {
+        border-color: var(--border-hover);
+        transform: translateY(-2px);
+    }
+    .stat-card .val {
+        font-size: 1.6rem;
+        font-weight: 800;
+        margin: 0;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .stat-card .lbl {
+        color: var(--text-muted);
+        font-size: 0.6rem;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        margin: 0.15rem 0 0 0;
+    }
+    .c-cyan { color: var(--accent); }
+    .c-red { color: var(--danger); }
+    .c-yellow { color: var(--warning); }
+    .c-green { color: var(--success); }
+
+    /* ── Event cards ── */
+    .event-card {
+        background: var(--bg-glass);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.7rem 0.9rem;
+        margin-bottom: 0.5rem;
+        transition: all 0.25s ease;
+        animation: slide-up 0.3s ease;
+    }
+    .event-card:hover {
+        border-color: var(--border-hover);
+        background: rgba(15, 23, 42, 0.7);
+    }
+    .event-card.high-event {
+        border-color: rgba(239,68,68,0.25);
+        animation: border-pulse 2s ease-in-out infinite, slide-up 0.3s ease;
+    }
+
+    /* ── Badges ── */
+    .badge {
+        display: inline-block;
+        padding: 0.15rem 0.55rem;
+        border-radius: 6px;
+        font-size: 0.6rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .badge-high {
+        background: rgba(239,68,68,0.12);
+        color: var(--danger);
+        border: 1px solid rgba(239,68,68,0.25);
+        box-shadow: 0 0 8px rgba(239,68,68,0.15);
+    }
+    .badge-medium {
+        background: rgba(245,158,11,0.12);
+        color: var(--warning);
+        border: 1px solid rgba(245,158,11,0.25);
+    }
+    .badge-low {
+        background: rgba(16,185,129,0.12);
+        color: var(--success);
+        border: 1px solid rgba(16,185,129,0.25);
+    }
+
+    /* ── Analysis card ── */
+    .analysis-card {
+        background: var(--bg-glass);
+        backdrop-filter: blur(16px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.9rem 1.1rem;
+        margin-top: 0.4rem;
+        animation: slide-up 0.4s ease;
+    }
+    .analysis-card .a-header {
+        display: flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.4rem 1rem;
-        border-radius: 20px;
+        margin-bottom: 0.5rem;
+    }
+    .analysis-card .a-title {
+        color: var(--accent);
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        margin: 0;
+    }
+    .analysis-card .a-desc {
+        color: var(--text-primary);
+        font-size: 0.82rem;
+        line-height: 1.4;
+        margin: 0.3rem 0;
+    }
+    .analysis-card .a-telugu {
+        color: var(--text-secondary);
+        font-size: 0.78rem;
+        font-style: italic;
+        margin: 0.2rem 0;
+    }
+    .action-alert {
+        margin-top: 0.4rem;
+        padding: 0.35rem 0.7rem;
+        background: rgba(239,68,68,0.08);
+        border: 1px solid rgba(239,68,68,0.2);
+        border-radius: 8px;
+        color: var(--danger);
+        font-size: 0.75rem;
+        font-weight: 600;
+        animation: border-pulse 2s infinite;
+    }
+
+    /* ── Camera placeholder ── */
+    .cam-off {
+        background: var(--bg-glass);
+        backdrop-filter: blur(12px);
+        border-radius: 14px;
+        padding: 50px 20px;
+        text-align: center;
+        border: 1px solid var(--border);
+    }
+    .cam-off h3 { margin: 0; font-weight: 700; }
+    .cam-off p { color: var(--text-muted); margin: 0.3rem 0 0 0; font-size: 0.85rem; }
+
+    /* ── Motion bar ── */
+    .motion-bar {
+        background: var(--bg-glass);
+        backdrop-filter: blur(12px);
+        border-radius: 8px;
+        padding: 0.35rem 0.7rem;
+        font-size: 0.7rem;
+        color: var(--text-secondary);
+        border: 1px solid var(--border);
+        font-family: 'JetBrains Mono', monospace;
+        margin-top: 0.3rem;
+    }
+
+    /* ── Feed header ── */
+    .feed-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+    }
+    .feed-title {
+        color: var(--text-primary);
         font-size: 0.85rem;
-        font-weight: 500;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        margin: 0;
     }
-    .status-monitoring {
-        background: rgba(11,232,129,0.15);
-        color: #0be881;
-        border: 1px solid rgba(11,232,129,0.3);
-    }
-    .status-paused {
-        background: rgba(245,166,35,0.15);
-        color: #f5a623;
-        border: 1px solid rgba(245,166,35,0.3);
+    .feed-count {
+        color: var(--text-muted);
+        font-size: 0.65rem;
+        font-family: 'JetBrains Mono', monospace;
     }
 
-    /* Camera feed container */
-    .camera-container {
-        background: #0a0a1a;
-        border-radius: 12px;
-        overflow: hidden;
-        border: 2px solid rgba(255,255,255,0.05);
-        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    /* ── Section label ── */
+    .section-label {
+        color: var(--text-muted);
+        font-size: 0.6rem;
+        font-weight: 600;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        margin-bottom: 0.3rem;
     }
 
-    /* Config badges */
-    .config-ok { color: #0be881; }
-    .config-miss { color: #e94560; }
-
-    /* Hide Streamlit's default elements */
+    /* ── Hide Streamlit chrome ── */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     .stDeployButton { display: none; }
+    header[data-testid="stHeader"] { background: transparent; }
+
+    /* ── Sidebar ── */
+    section[data-testid="stSidebar"] {
+        background: rgba(3, 7, 18, 0.95);
+        backdrop-filter: blur(20px);
+        border-right: 1px solid var(--border);
+    }
+    section[data-testid="stSidebar"] .stRadio > label { font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Session state initialization
+# Session state
 # ---------------------------------------------------------------------------
 def init_session_state():
     defaults = {
-        "monitoring": False,
-        "camera": None,
-        "prev_frame": None,
-        "events_log": [],
-        "total_analyses": 0,
-        "motion_events": 0,
-        "source_type": "webcam",
-        "video_file_path": None,
-        "last_analysis_result": None,
-        "analyzer": BackgroundAnalyzer(),
+        "monitoring": False, "camera": None, "prev_frame": None,
+        "events_log": [], "total_analyses": 0, "motion_events": 0,
+        "source_type": "webcam", "video_file_path": None,
+        "last_analysis_result": None, "analyzer": BackgroundAnalyzer(),
         "frame_time": time.time(),
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
-
 
 init_session_state()
 
@@ -209,64 +383,64 @@ init_session_state()
 # Camera management
 # ---------------------------------------------------------------------------
 def open_camera(source=0):
-    """Open a camera or video file. Store in session state."""
     if st.session_state.camera is not None:
         st.session_state.camera.release()
-
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        st.error(f"❌ Failed to open video source: {source}")
+        st.error(f"❌ Failed to open: {source}")
         return False
-
     st.session_state.camera = cap
     st.session_state.prev_frame = None
     return True
 
-
 def release_camera():
-    """Release the camera."""
     if st.session_state.camera is not None:
         st.session_state.camera.release()
         st.session_state.camera = None
         st.session_state.prev_frame = None
 
-
 def read_frame():
-    """Read a frame from the active camera."""
     if st.session_state.camera is None:
         return None
-
     ret, frame = st.session_state.camera.read()
     if not ret:
-        # If video file reached the end, loop
         if st.session_state.source_type == "video":
             st.session_state.camera.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = st.session_state.camera.read()
-            if not ret:
-                return None
+            if not ret: return None
         else:
             return None
-
     return frame
 
 
 # ---------------------------------------------------------------------------
-# Helper: render threat badge
+# Helpers
 # ---------------------------------------------------------------------------
 def threat_badge(level: str) -> str:
-    level_lower = level.lower()
-    css_class = f"badge-{level_lower}" if level_lower in ("high", "medium", "low") else "badge-low"
-    emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(level_lower, "⚪")
-    return f'<span class="badge {css_class}">{emoji} {level.upper()}</span>'
+    l = level.lower()
+    cls = f"badge-{l}" if l in ("high", "medium", "low") else "badge-low"
+    emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(l, "⚪")
+    return f'<span class="badge {cls}">{emoji} {level.upper()}</span>'
 
 
 # ---------------------------------------------------------------------------
 # HEADER
 # ---------------------------------------------------------------------------
-st.markdown("""
-<div class="main-header">
-    <h1>🛡️ Home Guard AI</h1>
-    <p>Intelligent Surveillance System — Powered by Claude AI & OpenCV</p>
+if st.session_state.monitoring:
+    badge = '<div class="live-badge active"><span class="dot"></span>LIVE</div>'
+else:
+    badge = '<div class="live-badge paused">⏸ STANDBY</div>'
+
+st.markdown(f"""
+<div class="aegis-header">
+    <div class="logo-group">
+        <span class="shield">🛡️</span>
+        <div>
+            <h1>AEGIS</h1>
+            <p class="tagline">AI-Powered Surveillance</p>
+        </div>
+    </div>
+    {badge}
 </div>
 """, unsafe_allow_html=True)
 
@@ -275,26 +449,10 @@ st.markdown("""
 # SIDEBAR
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ System Configuration")
-
-    # Status indicators
-    claude_status = "✅ Connected" if is_claude_configured() else "❌ Not configured"
-    twilio_status = "✅ Connected" if is_twilio_configured() else "❌ Not configured"
-
-    st.markdown(f"""
-    | Service | Status |
-    |---------|--------|
-    | **Claude AI** | {claude_status} |
-    | **Twilio** | {twilio_status} |
-    | **Database** | ✅ Ready |
-    """)
-
-    st.divider()
-
-    # Source selection
-    st.markdown("### 📹 Video Source")
+    # Source
+    st.markdown('<p class="section-label">📹 Video Source</p>', unsafe_allow_html=True)
     source_type = st.radio(
-        "Select source:",
+        "Source:",
         ["🎥 Live Webcam", "📁 Upload Video"],
         index=0 if st.session_state.source_type == "webcam" else 1,
         label_visibility="collapsed",
@@ -302,97 +460,55 @@ with st.sidebar:
 
     if "Live Webcam" in source_type:
         st.session_state.source_type = "webcam"
-        camera_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
+        camera_index = st.number_input("Camera", min_value=0, max_value=10, value=0, step=1)
     else:
         st.session_state.source_type = "video"
-        uploaded = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov", "mkv"])
+        uploaded = st.file_uploader("Upload", type=["mp4", "avi", "mov", "mkv"])
         if uploaded:
-            # Save to temp file
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             tfile.write(uploaded.read())
             tfile.flush()
             st.session_state.video_file_path = tfile.name
-            st.success(f"✅ Video loaded: {uploaded.name}")
+            st.success(f"✅ {uploaded.name}")
 
-    st.divider()
+    st.markdown("")
 
-    # Monitoring controls
-    st.markdown("### 🔒 Privacy Controls")
+    # Controls
     col_start, col_stop = st.columns(2)
     with col_start:
-        if st.button("▶️ Start", use_container_width=True, type="primary"):
+        if st.button("▶ START", use_container_width=True, type="primary"):
             st.session_state.monitoring = True
             if st.session_state.source_type == "webcam":
                 open_camera(camera_index)
             elif st.session_state.video_file_path:
                 open_camera(st.session_state.video_file_path)
     with col_stop:
-        if st.button("⏹️ Stop", use_container_width=True):
+        if st.button("■ STOP", use_container_width=True):
             st.session_state.monitoring = False
             release_camera()
 
-    # Monitoring status
-    if st.session_state.monitoring:
-        st.markdown('<div class="status-active status-monitoring">🟢 MONITORING ACTIVE</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="status-active status-paused">🟡 SYSTEM PAUSED</div>', unsafe_allow_html=True)
-
-    st.divider()
+    st.markdown("---")
 
     # Analysis mode
-    st.markdown("### 🧠 Analysis Mode")
-    use_mock = st.checkbox("Use mock analysis (no API)", value=not is_claude_configured())
+    use_mock = st.checkbox("Mock mode (no API)", value=not is_claude_configured())
 
-    st.divider()
-
-    st.markdown("""
-    ### 📋 About
-    **Home Guard AI** uses computer vision and AI to provide
-    intelligent home surveillance. Built with:
-    - 🔍 OpenCV for motion detection
-    - 🧠 Claude AI for threat analysis
-    - 📱 Twilio for WhatsApp alerts
-    - 🗄️ PostgreSQL for event logging
-    """)
+    st.markdown("---")
+    st.caption("🛡️ Aegis v2.0")
+    st.caption("Claude AI • OpenCV • Twilio")
 
 
 # ---------------------------------------------------------------------------
-# STATS BAR
+# STATS
 # ---------------------------------------------------------------------------
 stats = get_event_stats()
-st.markdown("### 📊 Dashboard")
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    st.markdown(f"""
-    <div class="stat-card stat-total">
-        <p class="stat-value">{stats['total']}</p>
-        <p class="stat-label">Total Events</p>
-    </div>
-    """, unsafe_allow_html=True)
-with c2:
-    st.markdown(f"""
-    <div class="stat-card stat-high">
-        <p class="stat-value">{stats['high']}</p>
-        <p class="stat-label">High Threats</p>
-    </div>
-    """, unsafe_allow_html=True)
-with c3:
-    st.markdown(f"""
-    <div class="stat-card stat-med">
-        <p class="stat-value">{stats['medium']}</p>
-        <p class="stat-label">Medium Alerts</p>
-    </div>
-    """, unsafe_allow_html=True)
-with c4:
-    st.markdown(f"""
-    <div class="stat-card stat-low">
-        <p class="stat-value">{stats['low']}</p>
-        <p class="stat-label">Low Events</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("")
+st.markdown(f"""
+<div class="stats-row">
+    <div class="stat-card"><p class="val c-cyan">{stats['total']}</p><p class="lbl">Total</p></div>
+    <div class="stat-card"><p class="val c-red">{stats['high']}</p><p class="lbl">Critical</p></div>
+    <div class="stat-card"><p class="val c-yellow">{stats['medium']}</p><p class="lbl">Warnings</p></div>
+    <div class="stat-card"><p class="val c-green">{stats['low']}</p><p class="lbl">Normal</p></div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +519,6 @@ col_camera, col_feed = st.columns([3, 2])
 
 # ----- LEFT: Camera Feed -----
 with col_camera:
-    st.markdown("### 📹 Live Feed")
-
     camera_placeholder = st.empty()
     motion_info = st.empty()
     analysis_result_box = st.empty()
@@ -413,31 +527,25 @@ with col_camera:
         frame = read_frame()
 
         if frame is not None:
-            # Pre-process
             processed = preprocess_frame(frame)
 
-            # Smart 3-layer pre-filtering
             motion = detect_motion(st.session_state.prev_frame, processed)
             motion_score = get_motion_score(st.session_state.prev_frame, processed)
             should_analyze, filter_reason, bboxes = should_call_claude(
                 st.session_state.prev_frame, processed
             )
 
-            # Check for completed background analysis
+            # Background analysis
             analyzer = st.session_state.analyzer
             bg_result, bg_b64 = analyzer.get_result()
             if bg_result and "error" not in bg_result:
                 st.session_state.last_analysis_result = bg_result
                 st.session_state.total_analyses += 1
-
-                # Log to database
                 log_event(
                     bg_result.get("threat_level", "low"),
                     bg_result.get("description", "No description"),
                     bg_b64 or "",
                 )
-
-                # Trigger WhatsApp + Voice Call for HIGH threats
                 if bg_result.get("threat_level", "").lower() == "high":
                     send_high_threat_alert(
                         bg_result.get("description", ""),
@@ -447,173 +555,178 @@ with col_camera:
             elif bg_result and "error" in bg_result:
                 analysis_result_box.warning(f"Analysis error: {bg_result['error']}")
 
-            # Draw overlays
+            # Overlays
             display_frame = processed.copy()
             is_analyzing = analyzer.is_busy
             if is_analyzing:
-                status_text = "🧠 ANALYZING (Claude)"
-                status_color = (255, 165, 0)  # Orange — Claude is thinking
+                status_text = "ANALYZING..."
+                status_color = (248, 189, 56)
             elif should_analyze:
-                status_text = f"🎯 {filter_reason}"
-                status_color = (0, 0, 255)  # Red — about to send
+                status_text = f"DETECTED: {filter_reason}"
+                status_color = (68, 68, 239)
             elif motion:
-                status_text = f"⚡ MOTION ({filter_reason})"
-                status_color = (0, 165, 255)  # Orange — motion but filtered
+                status_text = f"MOTION ({filter_reason})"
+                status_color = (11, 158, 245)
             else:
                 status_text = "MONITORING"
-                status_color = (0, 255, 0)  # Green — all clear
+                status_color = (16, 185, 129)
 
             display_frame = draw_status_overlay(display_frame, status_text, status_color)
             display_frame = draw_motion_border(display_frame, motion)
-
-            # Draw bounding boxes on detected objects
             if bboxes:
                 display_frame = draw_bounding_boxes(display_frame, bboxes)
 
-            # Convert BGR → RGB for Streamlit
             display_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
             camera_placeholder.image(display_rgb, channels="RGB", use_container_width=True)
 
-            # Motion info
-            analyzing_label = '🟠 Claude analyzing...' if is_analyzing else ('🔴 Sending' if should_analyze else '🟡 Filtered' if motion else '🟢 Stable')
+            # Motion bar
+            if is_analyzing:
+                s_icon, s_text = "🟠", "Analyzing..."
+            elif should_analyze:
+                s_icon, s_text = "🔴", "Sending"
+            elif motion:
+                s_icon, s_text = "🟡", "Filtered"
+            else:
+                s_icon, s_text = "🟢", "Stable"
+
             motion_info.markdown(
-                f"**Motion:** `{motion_score:.2%}` | "
-                f"**Filter:** {filter_reason} | "
-                f"**Status:** {analyzing_label} | "
-                f"**Throttle:** {'🟢 Ready' if can_analyze() else '🟡 Cooling down...'}"
+                f'<div class="motion-bar">'
+                f'{s_icon} {s_text} &nbsp;│&nbsp; '
+                f'Motion: {motion_score:.1%} &nbsp;│&nbsp; '
+                f'{filter_reason}'
+                f'</div>',
+                unsafe_allow_html=True,
             )
 
-            # Submit to background analyzer (non-blocking!)
+            # Submit to analyzer
             if should_analyze and not analyzer.is_busy:
                 st.session_state.motion_events += 1
                 analyzer.submit(processed, use_mock=use_mock)
 
-            # Show last analysis result
+            # Analysis result
             last = st.session_state.last_analysis_result
             if last:
                 action = last.get('action_needed', '')
-                action_line = f"\n                - **⚡ Action:** {action}" if action else ""
                 people = last.get('people_count', '')
-                people_line = f"\n                - **👥 People:** {people}" if people != '' else ""
+                threat_lvl = last.get('threat_level', 'low')
+
+                action_html = ""
+                if action and threat_lvl.lower() in ("high", "medium"):
+                    action_html = f'<div class="action-alert">⚡ {action}</div>'
+
+                people_html = f' &nbsp;│&nbsp; 👥 {people}' if people else ''
+
                 analysis_result_box.markdown(f"""
-                **🧠 Latest Analysis:**
-                - **Threat:** {threat_badge(last.get('threat_level', 'low'))}
-                - **Category:** {last.get('category', 'N/A')}{people_line}
-                - **EN:** {last.get('description', '')}
-                - **TE:** {last.get('description_telugu', '')}{action_line}
+                <div class="analysis-card">
+                    <div class="a-header">
+                        <span class="a-title">Analysis</span>
+                        {threat_badge(threat_lvl)}
+                        <span style="color:var(--text-muted); font-size:0.7rem; font-family:'JetBrains Mono',monospace;">{last.get('category', '').upper()}{people_html}</span>
+                    </div>
+                    <p class="a-desc">{last.get('description', '')}</p>
+                    <p class="a-telugu">{last.get('description_telugu', '')}</p>
+                    {action_html}
+                </div>
                 """, unsafe_allow_html=True)
 
-            # Update previous frame
             st.session_state.prev_frame = processed.copy()
 
-            # Frame pacing — target ~5 FPS (Streamlit's realistic limit)
+            # Frame pacing — ~5 FPS
             elapsed = time.time() - st.session_state.frame_time
-            target_delay = 1.0 / 5.0  # 5 FPS
-            sleep_time = max(0.05, target_delay - elapsed)
+            sleep_time = max(0.05, 0.2 - elapsed)
             time.sleep(sleep_time)
             st.session_state.frame_time = time.time()
             st.rerun()
 
         else:
             camera_placeholder.markdown("""
-            <div class="camera-container" style="padding:80px; text-align:center;">
-                <h3 style="color:#e94560;">⚠️ No Frame Available</h3>
-                <p style="color:#a0a0b0;">Check your camera connection or video file.</p>
+            <div class="cam-off">
+                <h3 style="color:var(--danger);">⚠️ No Frame</h3>
+                <p>Check your camera or video file.</p>
             </div>
             """, unsafe_allow_html=True)
     else:
         camera_placeholder.markdown("""
-        <div class="camera-container" style="padding:80px; text-align:center;">
-            <h3 style="color:#f5a623;">🔒 System Paused</h3>
-            <p style="color:#a0a0b0;">Click <b>▶️ Start</b> in the sidebar to begin monitoring.</p>
+        <div class="cam-off">
+            <h3 style="color:var(--accent);">🛡️ Aegis Ready</h3>
+            <p>Press ▶ START to begin monitoring.</p>
         </div>
         """, unsafe_allow_html=True)
 
 
 # ----- RIGHT: Activity Feed -----
 with col_feed:
-    st.markdown("### 📋 Activity Feed")
+    event_list = get_recent_events(limit=10)
+    count = len(event_list) if event_list else 0
 
-    # Manual analyze button
-    if st.button("🔄 Refresh Feed", use_container_width=True):
-        st.rerun()
+    st.markdown(f"""
+    <div class="feed-header">
+        <p class="feed-title">📋 Activity Feed</p>
+        <span class="feed-count">{count} events</span>
+    </div>
+    """, unsafe_allow_html=True)
 
-    events = get_recent_events(limit=10)
-
-    if events:
-        for idx, event in enumerate(events):
+    if event_list:
+        for idx, event in enumerate(event_list):
             level = event.get("threat_level", "low")
             badge_html = threat_badge(level)
             desc = event.get("description", "No description")
             ts = event.get("timestamp", "")
+            extra_cls = "high-event" if level.lower() == "high" else ""
 
-            # Build event card
-            card_html = f"""
-            <div class="event-card">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            st.markdown(f"""
+            <div class="event-card {extra_cls}">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.25rem;">
                     {badge_html}
-                    <span style="color:#666; font-size:0.75rem;">{ts}</span>
+                    <span style="color:var(--text-muted); font-size:0.65rem; font-family:'JetBrains Mono',monospace;">{ts}</span>
                 </div>
-                <p style="margin:0; color:#d0d0d0; font-size:0.85rem;">{desc}</p>
+                <p style="margin:0; color:var(--text-primary); font-size:0.78rem; line-height:1.35;">{desc}</p>
             </div>
-            """
-            st.markdown(card_html, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-            # Show thumbnail for latest 5 events only (keeps media cache small)
-            if idx < 5 and event.get("image_data"):
+            # Thumbnail for latest 3
+            if idx < 3 and event.get("image_data"):
                 try:
                     img_bytes = base64.b64decode(event["image_data"])
                     img = Image.open(BytesIO(img_bytes))
-                    st.image(img, width=180, caption=f"Frame #{event.get('id', '')}")
+                    st.image(img, width=150)
                 except Exception:
                     pass
-
     else:
         st.markdown("""
-        <div class="event-card" style="text-align:center; padding:2rem;">
-            <p style="color:#a0a0b0; margin:0;">No events recorded yet.</p>
-            <p style="color:#666; margin:0.3rem 0 0 0; font-size:0.8rem;">Start monitoring to detect activity.</p>
+        <div class="cam-off" style="padding:2rem;">
+            <p style="color:var(--text-muted); margin:0; font-size:0.85rem;">No events yet. Start monitoring to begin.</p>
         </div>
         """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# SECURITY LOG TAB (full history)
+# SECURITY LOG
 # ---------------------------------------------------------------------------
 st.markdown("---")
-st.markdown("### 🗂️ Security Log")
-
-with st.expander("View Full Event History", expanded=False):
+with st.expander("🗂️ Security Log", expanded=False):
     all_events = get_recent_events(limit=50)
     if all_events:
-        # Build a table
         import pandas as pd
         df = pd.DataFrame(all_events)
         df = df[["id", "timestamp", "threat_level", "description"]]
-        df.columns = ["ID", "Timestamp", "Threat Level", "Description"]
-
-        # Color-code threat levels
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Threat Level": st.column_config.TextColumn(width="small"),
-                "Description": st.column_config.TextColumn(width="large"),
-            },
-        )
+        df.columns = ["ID", "Timestamp", "Threat", "Description"]
+        st.dataframe(df, use_container_width=True, hide_index=True, column_config={
+            "Threat": st.column_config.TextColumn(width="small"),
+            "Description": st.column_config.TextColumn(width="large"),
+        })
     else:
-        st.info("No events in the security log yet.")
+        st.info("No events yet.")
 
 
 # ---------------------------------------------------------------------------
 # FOOTER
 # ---------------------------------------------------------------------------
 st.markdown("---")
-fcol1, fcol2, fcol3 = st.columns(3)
-with fcol1:
+f1, f2, f3 = st.columns(3)
+with f1:
     st.caption(f"🧠 Analyses: {st.session_state.total_analyses}")
-with fcol2:
-    st.caption(f"⚡ Motion Events: {st.session_state.motion_events}")
-with fcol3:
-    st.caption("🛡️ Home Guard AI v1.0 — Built for Hackathon")
+with f2:
+    st.caption(f"⚡ Detections: {st.session_state.motion_events}")
+with f3:
+    st.caption("🛡️ Aegis v2.0")

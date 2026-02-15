@@ -233,7 +233,7 @@ def draw_status_overlay(frame, status: str = "MONITORING", color=(0, 255, 0)):
 
     # Status text
     cv2.putText(
-        frame, f"HOME GUARD AI | {status}",
+        frame, f"AEGIS | {status}",
         (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2
     )
 
