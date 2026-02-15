@@ -68,10 +68,10 @@ with WebRTC & RTSP** integration — enabling direct browser camera access, mult
 and scalable real-time monitoring from anywhere.
 """)
     if st.button("Got it, let's go! 🚀", use_container_width=True, type="primary"):
-        st.session_state._welcome_shown = True
         st.rerun()
 
 if not st.session_state.get("_welcome_shown", False):
+    st.session_state._welcome_shown = True  # Mark shown BEFORE opening, so reruns don't retrigger
     _show_welcome()
 
 
