@@ -11,6 +11,7 @@ import os
 import time
 import base64
 import json
+import threading
 import cv2
 import numpy as np
 from dotenv import load_dotenv
@@ -31,6 +32,11 @@ THROTTLE_SECONDS = 5             # min gap between Claude calls
 
 # Track last analysis time for throttling
 _last_analysis_time = 0.0
+
+# HOG frame counter — only run HOG every Nth frame to save CPU
+_hog_frame_counter = 0
+_hog_run_every = 10  # run HOG every 10th frame
+_last_hog_result = (False, [])  # cache last HOG result
 
 
 def preprocess_frame(frame):
@@ -93,6 +99,126 @@ def get_motion_score(prev_frame, curr_frame) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Smart Pre-Filtering (Layer 2 — FREE, no API calls)
+# ---------------------------------------------------------------------------
+
+# HOG (Histogram of Oriented Gradients) person detector
+_hog = cv2.HOGDescriptor()
+_hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+# Minimum contour area to be considered "significant" (filters shadows/leaves)
+MIN_CONTOUR_AREA = 3000  # pixels — roughly a person-sized blob at 640x480
+
+
+def detect_person_hog(frame) -> tuple:
+    """
+    Use OpenCV HOG descriptor to detect human-shaped objects.
+    Only runs every 10th frame to save CPU. Returns cached result otherwise.
+    Returns (bool, list_of_bounding_boxes).
+    FREE — no API call needed.
+    """
+    global _hog_frame_counter, _last_hog_result
+
+    if frame is None:
+        return False, []
+
+    _hog_frame_counter += 1
+
+    # Only run expensive HOG every Nth frame, return cached result otherwise
+    if _hog_frame_counter % _hog_run_every != 0:
+        return _last_hog_result
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    boxes, weights = _hog.detectMultiScale(
+        gray, winStride=(8, 8), padding=(4, 4), scale=1.05
+    )
+
+    # Filter by confidence
+    confident_boxes = []
+    for i, (x, y, w, h) in enumerate(boxes):
+        if len(weights) > i and weights[i] > 0.3:
+            confident_boxes.append((x, y, w, h))
+
+    _last_hog_result = (len(confident_boxes) > 0, confident_boxes)
+    return _last_hog_result
+
+
+def detect_significant_contours(prev_frame, curr_frame) -> tuple:
+    """
+    Find large contours in the motion diff to filter out small/noise movements.
+    Returns (bool, list_of_bounding_boxes).
+    FREE — no API call needed.
+    """
+    if prev_frame is None or curr_frame is None:
+        return True, []
+
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+
+    # Blur to reduce noise
+    prev_blur = cv2.GaussianBlur(prev_gray, (21, 21), 0)
+    curr_blur = cv2.GaussianBlur(curr_gray, (21, 21), 0)
+
+    diff = cv2.absdiff(prev_blur, curr_blur)
+    _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+
+    # Dilate to fill gaps
+    thresh = cv2.dilate(thresh, None, iterations=2)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    significant_boxes = []
+    for contour in contours:
+        if cv2.contourArea(contour) > MIN_CONTOUR_AREA:
+            (x, y, w, h) = cv2.boundingRect(contour)
+            significant_boxes.append((x, y, w, h))
+
+    return len(significant_boxes) > 0, significant_boxes
+
+
+def should_call_claude(prev_frame, curr_frame) -> tuple:
+    """
+    Smart 3-layer gating to decide if Claude should be called:
+      Layer 1: Motion detection (pixel diff > 5%)
+      Layer 2a: Significant contour detection (large moving blobs)
+      Layer 2b: HOG person detection (human-shaped object)
+      Layer 3: Throttle (5-second cooldown)
+
+    Returns (should_analyze: bool, reason: str, bounding_boxes: list)
+    """
+    # Layer 1: Basic motion
+    if not detect_motion(prev_frame, curr_frame):
+        return False, "No motion", []
+
+    # Layer 2a: Check for large contours (person-sized blobs)
+    has_significant, contour_boxes = detect_significant_contours(prev_frame, curr_frame)
+    if not has_significant:
+        return False, "Motion too small (shadow/noise)", []
+
+    # Layer 2b: HOG person detection (optional boost — if person found, definitely analyze)
+    has_person, person_boxes = detect_person_hog(curr_frame)
+
+    # Layer 3: Throttle
+    if not can_analyze():
+        return False, "Throttled (cooling down)", contour_boxes
+
+    # Combine boxes for display
+    all_boxes = person_boxes if person_boxes else contour_boxes
+    reason = "Person detected (HOG)" if has_person else "Large movement detected"
+
+    return True, reason, all_boxes
+
+
+def draw_bounding_boxes(frame, boxes, color=(0, 255, 255), label="DETECTED"):
+    """Draw bounding boxes on frame for detected objects."""
+    for (x, y, w, h) in boxes:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(frame, label, (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    return frame
+
+
+# ---------------------------------------------------------------------------
 # Frame overlay drawing
 # ---------------------------------------------------------------------------
 
@@ -134,26 +260,16 @@ def draw_motion_border(frame, motion_detected: bool):
 # Claude 3 Haiku analysis
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a high-security AI for an Indian household surveillance system called "Home Guard AI".
+SYSTEM_PROMPT = """You are "Aegis", an Indian home surveillance AI. Analyze the camera frame and respond ONLY with valid JSON (no markdown, no fences):
 
-Analyze the provided image and respond ONLY with valid JSON (no markdown, no code fences) in this exact format:
-{
-    "threat_level": "low" | "medium" | "high",
-    "description": "1-sentence description in English",
-    "description_telugu": "Same description translated to Telugu",
-    "category": "delivery" | "visitor" | "family" | "stranger" | "animal" | "vehicle" | "empty" | "other",
-    "details": "Brief explanation of what you see and why you assigned this threat level"
-}
+{"threat_level":"low|medium|high","description":"2-3 sentences. Be SPECIFIC: clothing color, age, gender, exact action, location in frame.","description_telugu":"Same in conversational Telugu.","category":"delivery|visitor|family|stranger|animal|vehicle|empty|other","people_count":0,"action_needed":"Exact instruction for homeowner.","details":"Why this threat level."}
 
-Rules:
-- If you see a delivery agent (Zomato/Swiggy/Amazon/Flipkart uniform or package), mark as LOW threat.
-- If you see a known uniform (postman, police), mark as LOW threat.
-- If you see a stranger loitering near the entrance or looking suspicious, mark as HIGH threat.
-- If you see someone trying to peek, climb, or tamper with the door/gate, mark as HIGH threat.
-- If the scene is calm with no unusual activity, mark as LOW threat.
-- If unsure about a person's intent, mark as MEDIUM threat.
-- Animals or vehicles passing by without stopping: LOW threat.
-- Provide the Telugu translation naturally — this is for a Telugu-speaking household.
+THREAT RULES:
+- LOW: Empty/calm scene, delivery agents (Zomato/Swiggy/Amazon uniform), family, service workers, animals passing. Action: "No action needed"
+- MEDIUM: Unknown person near house (not suspicious), unfamiliar group, parked vehicle, unclear intent. Action: "Monitor situation"
+- HIGH: Stranger loitering/peeking/watching house, climbing walls/gates, tampering with locks/doors, masked person, fighting, weapons/tools, trespassing. Action: "Call police immediately" or "Alert family NOW"
+
+HIGH ALERT RULE: For HIGH threats you MUST describe: (1) WHO — gender, clothing, build (2) WHAT — exact suspicious action (3) WHERE — location relative to house (4) WHY — why this is dangerous. Be urgent and clear.
 """
 
 
@@ -284,3 +400,75 @@ def analyze_frame_mock(frame) -> dict:
         "category": "empty",
         "details": f"Normal scene, dark region: {dark_ratio:.1%}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Background Analyzer — runs Claude in a separate thread (non-blocking)
+# ---------------------------------------------------------------------------
+
+class BackgroundAnalyzer:
+    """
+    Runs Claude analysis in a background thread so the video feed doesn't freeze.
+    The main loop checks `get_result()` each frame — if a result is ready, it
+    processes it; if not, the video keeps playing smoothly.
+    """
+
+    def __init__(self):
+        self._result = None
+        self._pending = False
+        self._lock = threading.Lock()
+        self._frame_b64 = None  # store b64 for logging
+
+    @property
+    def is_busy(self) -> bool:
+        """True if a Claude analysis is currently running in the background."""
+        with self._lock:
+            return self._pending
+
+    def submit(self, frame, use_mock: bool = False):
+        """
+        Submit a frame for analysis. Non-blocking — returns immediately.
+        The analysis runs in a background thread.
+        """
+        with self._lock:
+            if self._pending:
+                return  # already analyzing, skip
+            self._pending = True
+            self._result = None
+
+        # Store frame b64 for event logging later
+        processed = preprocess_frame(frame)
+        self._frame_b64 = frame_to_base64(processed)
+
+        def _run():
+            try:
+                if use_mock:
+                    result = analyze_frame_mock(processed)
+                else:
+                    result = analyze_frame(processed)
+
+                with self._lock:
+                    self._result = result
+                    self._pending = False
+            except Exception as e:
+                print(f"[BG-ANALYZER] Error: {e}")
+                with self._lock:
+                    self._result = {"error": str(e)}
+                    self._pending = False
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+    def get_result(self) -> tuple:
+        """
+        Check if a result is ready. Non-blocking.
+        Returns (result_dict_or_None, frame_b64_or_None).
+        """
+        with self._lock:
+            if self._result is not None:
+                result = self._result
+                b64 = self._frame_b64
+                self._result = None
+                self._frame_b64 = None
+                return result, b64
+        return None, None

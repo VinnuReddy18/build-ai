@@ -32,10 +32,13 @@ from vision_engine import (
     get_motion_score,
     draw_status_overlay,
     draw_motion_border,
+    draw_bounding_boxes,
     analyze_frame,
     analyze_frame_mock,
     is_claude_configured,
     can_analyze,
+    should_call_claude,
+    BackgroundAnalyzer,
 )
 from alerts import send_high_threat_alert, is_configured as is_twilio_configured
 
@@ -191,6 +194,8 @@ def init_session_state():
         "source_type": "webcam",
         "video_file_path": None,
         "last_analysis_result": None,
+        "analyzer": BackgroundAnalyzer(),
+        "frame_time": time.time(),
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -411,73 +416,101 @@ with col_camera:
             # Pre-process
             processed = preprocess_frame(frame)
 
-            # Motion detection
+            # Smart 3-layer pre-filtering
             motion = detect_motion(st.session_state.prev_frame, processed)
             motion_score = get_motion_score(st.session_state.prev_frame, processed)
+            should_analyze, filter_reason, bboxes = should_call_claude(
+                st.session_state.prev_frame, processed
+            )
+
+            # Check for completed background analysis
+            analyzer = st.session_state.analyzer
+            bg_result, bg_b64 = analyzer.get_result()
+            if bg_result and "error" not in bg_result:
+                st.session_state.last_analysis_result = bg_result
+                st.session_state.total_analyses += 1
+
+                # Log to database
+                log_event(
+                    bg_result.get("threat_level", "low"),
+                    bg_result.get("description", "No description"),
+                    bg_b64 or "",
+                )
+
+                # Trigger WhatsApp alert for HIGH threats
+                if bg_result.get("threat_level", "").lower() == "high":
+                    send_high_threat_alert(
+                        bg_result.get("description", ""),
+                        bg_result.get("description_telugu", ""),
+                    )
+            elif bg_result and "error" in bg_result:
+                analysis_result_box.warning(f"Analysis error: {bg_result['error']}")
 
             # Draw overlays
             display_frame = processed.copy()
-            status_text = "MONITORING" if not motion else "⚡ MOTION DETECTED"
-            status_color = (0, 255, 0) if not motion else (0, 0, 255)
+            is_analyzing = analyzer.is_busy
+            if is_analyzing:
+                status_text = "🧠 ANALYZING (Claude)"
+                status_color = (255, 165, 0)  # Orange — Claude is thinking
+            elif should_analyze:
+                status_text = f"🎯 {filter_reason}"
+                status_color = (0, 0, 255)  # Red — about to send
+            elif motion:
+                status_text = f"⚡ MOTION ({filter_reason})"
+                status_color = (0, 165, 255)  # Orange — motion but filtered
+            else:
+                status_text = "MONITORING"
+                status_color = (0, 255, 0)  # Green — all clear
+
             display_frame = draw_status_overlay(display_frame, status_text, status_color)
             display_frame = draw_motion_border(display_frame, motion)
+
+            # Draw bounding boxes on detected objects
+            if bboxes:
+                display_frame = draw_bounding_boxes(display_frame, bboxes)
 
             # Convert BGR → RGB for Streamlit
             display_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
             camera_placeholder.image(display_rgb, channels="RGB", use_container_width=True)
 
             # Motion info
+            analyzing_label = '🟠 Claude analyzing...' if is_analyzing else ('🔴 Sending' if should_analyze else '🟡 Filtered' if motion else '🟢 Stable')
             motion_info.markdown(
-                f"**Motion Score:** `{motion_score:.2%}` | "
-                f"**Status:** {'🔴 Motion Detected' if motion else '🟢 Stable'} | "
+                f"**Motion:** `{motion_score:.2%}` | "
+                f"**Filter:** {filter_reason} | "
+                f"**Status:** {analyzing_label} | "
                 f"**Throttle:** {'🟢 Ready' if can_analyze() else '🟡 Cooling down...'}"
             )
 
-            # AI Analysis (if motion detected & not throttled)
-            if motion and can_analyze():
+            # Submit to background analyzer (non-blocking!)
+            if should_analyze and not analyzer.is_busy:
                 st.session_state.motion_events += 1
+                analyzer.submit(processed, use_mock=use_mock)
 
-                if use_mock:
-                    result = analyze_frame_mock(processed)
-                else:
-                    result = analyze_frame(processed)
-
-                if result and "error" not in result:
-                    st.session_state.last_analysis_result = result
-                    st.session_state.total_analyses += 1
-
-                    # Log to database
-                    img_b64 = frame_to_base64(processed)
-                    log_event(
-                        result.get("threat_level", "low"),
-                        result.get("description", "No description"),
-                        img_b64,
-                    )
-
-                    # Trigger WhatsApp alert for HIGH threats
-                    if result.get("threat_level", "").lower() == "high":
-                        send_high_threat_alert(
-                            result.get("description", ""),
-                            result.get("description_telugu", ""),
-                        )
-
-                    # Show analysis result
-                    analysis_result_box.markdown(f"""
-                    **🧠 Latest Analysis:**
-                    - **Threat:** {threat_badge(result.get('threat_level', 'low'))}
-                    - **Category:** {result.get('category', 'N/A')}
-                    - **EN:** {result.get('description', '')}
-                    - **TE:** {result.get('description_telugu', '')}
-                    """, unsafe_allow_html=True)
-
-                elif result and "error" in result:
-                    analysis_result_box.warning(f"Analysis error: {result['error']}")
+            # Show last analysis result
+            last = st.session_state.last_analysis_result
+            if last:
+                action = last.get('action_needed', '')
+                action_line = f"\n                - **⚡ Action:** {action}" if action else ""
+                people = last.get('people_count', '')
+                people_line = f"\n                - **👥 People:** {people}" if people != '' else ""
+                analysis_result_box.markdown(f"""
+                **🧠 Latest Analysis:**
+                - **Threat:** {threat_badge(last.get('threat_level', 'low'))}
+                - **Category:** {last.get('category', 'N/A')}{people_line}
+                - **EN:** {last.get('description', '')}
+                - **TE:** {last.get('description_telugu', '')}{action_line}
+                """, unsafe_allow_html=True)
 
             # Update previous frame
             st.session_state.prev_frame = processed.copy()
 
-            # Auto-refresh: rerun after a short delay for continuous monitoring
-            time.sleep(0.1)
+            # Frame pacing — target ~5 FPS (Streamlit's realistic limit)
+            elapsed = time.time() - st.session_state.frame_time
+            target_delay = 1.0 / 5.0  # 5 FPS
+            sleep_time = max(0.05, target_delay - elapsed)
+            time.sleep(sleep_time)
+            st.session_state.frame_time = time.time()
             st.rerun()
 
         else:
@@ -504,10 +537,10 @@ with col_feed:
     if st.button("🔄 Refresh Feed", use_container_width=True):
         st.rerun()
 
-    events = get_recent_events(limit=15)
+    events = get_recent_events(limit=10)
 
     if events:
-        for event in events:
+        for idx, event in enumerate(events):
             level = event.get("threat_level", "low")
             badge_html = threat_badge(level)
             desc = event.get("description", "No description")
@@ -525,14 +558,15 @@ with col_feed:
             """
             st.markdown(card_html, unsafe_allow_html=True)
 
-            # Show thumbnail if image data exists
-            if event.get("image_data"):
+            # Show thumbnail for latest 5 events only (keeps media cache small)
+            if idx < 5 and event.get("image_data"):
                 try:
                     img_bytes = base64.b64decode(event["image_data"])
                     img = Image.open(BytesIO(img_bytes))
-                    st.image(img, width=200, caption=f"Event #{event['id']}")
+                    st.image(img, width=180, caption=f"Frame #{event.get('id', '')}")
                 except Exception:
                     pass
+
     else:
         st.markdown("""
         <div class="event-card" style="text-align:center; padding:2rem;">
